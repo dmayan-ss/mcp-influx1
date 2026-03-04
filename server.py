@@ -12,11 +12,32 @@ mcp = FastMCP("influxdb")
 INFLUXDB_URL = os.environ.get("INFLUXDB_URL", "http://localhost:8086")
 INFLUXDB_USERNAME = os.environ.get("INFLUXDB_USERNAME")
 INFLUXDB_PASSWORD = os.environ.get("INFLUXDB_PASSWORD")
+INFLUXDB_TIMEOUT = float(os.environ.get("INFLUXDB_TIMEOUT", "30"))
 
 WRITE_PATTERN = re.compile(
     r"\b(CREATE|DROP|DELETE|ALTER|GRANT|REVOKE|KILL|INSERT|INTO)\b",
     re.IGNORECASE,
 )
+
+MAX_RETRIES = 2
+RETRY_BACKOFF = 0.5  # seconds, doubles each retry
+
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    """Return a shared httpx.AsyncClient, creating it on first use."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        auth = None
+        if INFLUXDB_USERNAME and INFLUXDB_PASSWORD:
+            auth = httpx.BasicAuth(INFLUXDB_USERNAME, INFLUXDB_PASSWORD)
+        _http_client = httpx.AsyncClient(
+            base_url=INFLUXDB_URL.rstrip("/"),
+            auth=auth,
+            timeout=INFLUXDB_TIMEOUT,
+        )
+    return _http_client
 
 
 async def _influx_request(
@@ -24,18 +45,25 @@ async def _influx_request(
     path: str,
     params: Optional[dict] = None,
 ) -> httpx.Response:
-    """Make an HTTP request to InfluxDB, adding auth params if configured."""
+    """Make an HTTP request to InfluxDB with automatic retry on transient errors."""
+    import asyncio
+
     if params is None:
         params = {}
-    if INFLUXDB_USERNAME:
-        params["u"] = INFLUXDB_USERNAME
-    if INFLUXDB_PASSWORD:
-        params["p"] = INFLUXDB_PASSWORD
 
-    url = f"{INFLUXDB_URL.rstrip('/')}{path}"
-    async with httpx.AsyncClient() as client:
-        resp = await client.request(method, url, params=params, timeout=30.0)
-        return resp
+    client = _get_client()
+    last_exc: Exception | None = None
+
+    for attempt in range(1 + MAX_RETRIES):
+        try:
+            resp = await client.request(method, path, params=params)
+            return resp
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+            last_exc = exc
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_BACKOFF * (2 ** attempt))
+
+    raise last_exc  # type: ignore[misc]
 
 
 async def _influx_query(

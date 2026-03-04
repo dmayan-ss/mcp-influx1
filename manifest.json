@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "mcflux-influxdb",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Read-only MCP server for querying and exploring InfluxDB v1 instances. Supports listing databases, measurements, tags, fields, and executing InfluxQL queries.",
   "author": {
     "name": "Diego Mayán",
